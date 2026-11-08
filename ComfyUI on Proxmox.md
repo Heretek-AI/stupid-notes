@@ -342,3 +342,149 @@ Tested on **Sapphire PULSE AMD Radeon RX 7900 XTX 24GB** on Minisforum MS-S1 MAX
 
 - **Speedup:** **2.5× faster end-to-end generation** (dropping from 17.6s to 7.05s).
 - **GPU Operating State:** 55°C core temperature, 14W idle power draw, link stable at PCIe 4.0 16 GT/s.
+
+---
+
+## 9. SwarmUI Frontend Deployment & Headless ComfyUI Orchestration
+
+While ComfyUI's raw node graph is exceptional for workflow design and debugging, daily image generation benefits greatly from an ergonomic, tabbed UI with prompt history, parameter presets, batching, grid generation, and model metadata cards.
+
+[SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) is a modern .NET-based web frontend engineered specifically to orchestrate ComfyUI as its execution backend.
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │            LXC 107 (comfyui)            │
+                    │                                         │
+                    │  ┌───────────────────────────────────┐  │
+Operator Browser ───┼─►│ SwarmUI Web Frontend (:7801)      │  │
+                    │  │ (Presets, Grids, Model Cards, UI) │  │
+                    │  └─────────────────┬─────────────────┘  │
+                    │                    │ Local API          │
+                    │                    ▼ (:8188)            │
+                    │  ┌───────────────────────────────────┐  │
+                    │  │ Headless ComfyUI Server           │  │
+                    │  │ (FlashAttention-2, FeatherOps)    │  │
+                    │  └─────────────────┬─────────────────┘  │
+                    │                    │ HIP / ROCm 10.3    │
+                    │                    ▼                    │
+                    │  ┌───────────────────────────────────┐  │
+                    │  │ AMD Radeon RX 7900 XTX 24GB       │  │
+                    │  └───────────────────────────────────┘  │
+                    └─────────────────────────────────────────┘
+```
+
+### Step 1: Install .NET SDK 8.0 & Dependencies
+SwarmUI compiles as a self-hosted ASP.NET Core application:
+```bash
+pct exec 107 -- apt-get update
+pct exec 107 -- apt-get install -y dotnet-sdk-8.0 git libgdiplus
+```
+
+### Step 2: Clone & Build SwarmUI
+> [!IMPORTANT]
+> When executing commands inside LXC containers via `pct exec`, unset host runtime environment variables (`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`). Failing to do so causes .NET to attempt accessing `/run/user/0` inside the container, throwing `System.IO.IOException: The system cannot open the device or file specified. : 'NuGet-Migrations'` in `Mutex.CreateMutexCore`.
+
+```bash
+pct exec 107 -- git clone https://github.com/mcmonkeyprojects/SwarmUI /opt/SwarmUI
+
+pct exec 107 -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash -c '
+  cd /opt/SwarmUI
+  dotnet build src/SwarmUI.csproj --configuration Release -o ./src/bin/live_release
+  git rev-parse HEAD > src/bin/last_build
+'
+```
+
+### Step 3: Integrate Swarm Custom Nodes with ComfyUI
+SwarmUI requires lightweight helper nodes (`SwarmComfyCommon` and `SwarmComfyExtra`) inside ComfyUI to enable prompt parsing, websocket image streaming, and dynamic latents:
+```bash
+# Link nodes to ComfyUI custom_nodes:
+pct exec 107 -- ln -s /opt/SwarmUI/src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon /opt/ComfyUI/app/custom_nodes/SwarmComfyCommon
+pct exec 107 -- ln -s /opt/SwarmUI/src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyExtra /opt/ComfyUI/app/custom_nodes/SwarmComfyExtra
+
+# Install optional animation dependency safely without overwriting torch/rocm:
+pct exec 107 -- /opt/ComfyUI/venv/bin/pip install --no-deps imageio-ffmpeg
+
+# Restart ComfyUI to load the nodes:
+pct exec 107 -- systemctl restart comfyui.service
+```
+
+### Step 4: Configure Zero-Duplication Shared Models & Backend
+Configure SwarmUI to read models directly from `/opt/ComfyUI/app/models` and route all generation tasks to the local ComfyUI API (`http://127.0.0.1:8188`):
+
+Create `/opt/SwarmUI/Data/Backends.fds`:
+```yaml
+0:
+	type: comfyui_api
+	title: ComfyUI Local
+	enabled: true
+	settings:
+		Address: http://127.0.0.1:8188
+		AllowIdle: false
+		OverQueue: 1
+		EnableFrontendDev: false
+```
+
+In `/opt/SwarmUI/Data/Settings.fds`, set shared model roots and disable the setup wizard:
+```yaml
+Paths:
+	ModelRoot: /opt/ComfyUI/app/models
+	SDModelFolder: checkpoints;diffusion_models;unet
+	SDLoraFolder: loras;Lora
+	SDVAEFolder: vae;VAE
+	SDClipFolder: text_encoders;clip
+	SDControlNetsFolder: controlnet;model_patches
+
+Network:
+	Host: 0.0.0.0
+	Port: 7801
+
+IsInstalled: true
+LaunchMode: none
+```
+
+### Step 5: Systemd Service Unit
+Create `/etc/systemd/system/swarmui.service`:
+```ini
+[Unit]
+Description=SwarmUI Web Frontend for ComfyUI
+After=network.target comfyui.service
+Wants=comfyui.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/SwarmUI
+Environment="ASPNETCORE_ENVIRONMENT=Production"
+Environment="ASPNETCORE_URLS=http://0.0.0.0:7801"
+Environment="DOTNET_CLI_TELEMETRY_OPTOUT=1"
+Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1"
+ExecStart=/opt/SwarmUI/src/bin/live_release/SwarmUI --launch_mode none --host 0.0.0.0 --port 7801
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+pct exec 107 -- systemctl daemon-reload
+pct exec 107 -- systemctl enable --now swarmui.service
+```
+
+### Verification
+```bash
+# Verify SwarmUI API backend is connected:
+SESSION=$(curl -s -X POST http://192.168.31.235:7801/API/GetNewSession -H "Content-Type: application/json" -d '{}' | jq -r .session_id)
+curl -s -X POST http://192.168.31.235:7801/API/ListBackends -H "Content-Type: application/json" -d "{\"session_id\":\"$SESSION\"}" | jq '.[0].status'
+# Output: "running"
+
+# Verify ComfyUI model discovery in Swarm:
+curl -s -X POST http://192.168.31.235:7801/API/ListModels -H "Content-Type: application/json" -d "{\"session_id\":\"$SESSION\",\"path\":\"\",\"depth\":5}" | jq '.files[].name'
+# Output: "z_image_turbo_bf16.safetensors"
+```
+
+Operators can now access both interfaces:
+- **SwarmUI Clean Generation UI & Presets**: `http://192.168.31.235:7801`
+- **ComfyUI Raw Node Graph & Manager**: `http://192.168.31.235:8188`
+
