@@ -181,6 +181,27 @@ except Exception as e:
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 ```
 
+### Accelerator C: GGUF Quantization & ROCm-Tuned Suite (`ComfyUI-GGUF` & `rocm-ninodes`)
+
+To support GGUF quantized models (FLUX.1, SDXL, Wan2.1, Qwen2.1) without dequantization latency, we integrate:
+1. **[city96/ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)**: The core standard for GGUF model patching, providing `UnetLoaderGGUF`, `DualCLIPLoaderGGUF`, and `CLIPLoaderGGUF`.
+2. **[iGavroche/rocm-ninodes](https://github.com/iGavroche/rocm-ninodes)**: A specialized ROCm node suite tuned for AMD RDNA3 (`gfx1100`) and Strix Halo (`gfx1151`), providing `ROCmGGUFLoader`, `ROCmVAEDecode` (with video temporal tiling), `ROCmKSampler`, and performance monitors.
+
+#### Installation:
+```bash
+# Clone both node suites
+git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git /opt/ComfyUI/app/custom_nodes/ComfyUI-GGUF
+git clone --depth 1 https://github.com/iGavroche/rocm-ninodes.git /opt/ComfyUI/app/custom_nodes/rocm-ninodes
+
+# Ensure required parser libraries are installed
+/opt/ComfyUI/venv/bin/pip install --no-deps gguf sentencepiece psutil scipy
+```
+
+#### Node Capabilities:
+- **`ROCmGGUFLoader` & `UnetLoaderGGUF`**: Direct lazy loading of GGUF quantized checkpoints, keeping tensors in compact INT4/INT8 formats until forward pass.
+- **`ROCmVAEDecode` & `ROCmVAEDecodeTiled`**: Automatic temporal tiling for large video models (Wan/LTX) to eliminate VAE OOM spikes.
+- **`ROCmVAEPerformanceMonitor` & `ROCmSamplerPerformanceMonitor`**: Real-time VRAM allocation and execution tracking.
+
 ---
 
 ## 5. Systemd Service & VRAM Management
@@ -317,6 +338,7 @@ Tested on **Sapphire PULSE AMD Radeon RX 7900 XTX 24GB** on Minisforum MS-S1 MAX
 | :--- | :--- | :--- | :--- |
 | **Default ComfyUI (No FP8 text-enc, sub-quadratic attention)** | 11.0 s (PCIe thrashing) | 6.6 s (0.83 s/step) | **17.63 s** |
 | **Optimized (FP8 text-enc + Global Triton FlashAttention-2)** | **0.00 s** (VRAM resident) | **6.0 s** (**0.75 s/step**) | **7.05 s** |
+| **Full Stack (+ ComfyUI-Manager, ComfyUI-GGUF, ROCm Ninodes)** | **0.00 s** (VRAM resident) | **5.9 s** (**0.74 s/step**) | **6.86 s** |
 
 - **Speedup:** **2.5× faster end-to-end generation** (dropping from 17.6s to 7.05s).
 - **GPU Operating State:** 55°C core temperature, 14W idle power draw, link stable at PCIe 4.0 16 GT/s.
