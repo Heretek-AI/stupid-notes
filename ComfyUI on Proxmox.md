@@ -201,7 +201,7 @@ Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0"
 Environment="PYTORCH_ROCM_ARCH=gfx1100"
 Environment="TRITON_DEFAULT_FP_FUSION=1"
 Environment="PATH=/opt/ComfyUI/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=/opt/ComfyUI/venv/bin/python3 /opt/ComfyUI/app/main.py --listen 0.0.0.0 --port 8188 --highvram --fp8_e4m3fn-text-enc
+ExecStart=/opt/ComfyUI/venv/bin/python3 /opt/ComfyUI/app/main.py --listen 0.0.0.0 --port 8188 --highvram --fp8_e4m3fn-text-enc --enable-manager
 Restart=always
 RestartSec=3
 
@@ -223,7 +223,66 @@ systemctl enable --now comfyui.service
 
 ---
 
-## 6. Field Traps & Troubleshooting
+## 6. ComfyUI-Manager Integration (Modern Native Stack)
+
+In modern ComfyUI (`0.44+`), ComfyUI-Manager is no longer required to be installed as an unmanaged `git clone` inside `custom_nodes/ComfyUI-Manager`. It has been integrated natively into core as a Python package (`comfyui-manager`), orchestrated via core startup hooks and native frontend panels ([ComfyUI Manager Install Docs](https://docs.comfy.org/manager/install)).
+
+### Step 1: Install Manager Dependencies
+ComfyUI core pins the matching manager package in `manager_requirements.txt`:
+```bash
+/opt/ComfyUI/venv/bin/pip install -r /opt/ComfyUI/app/manager_requirements.txt
+```
+*(Installs `comfyui_manager>=4.2.2`, `GitPython`, `PyGithub`, `uv`, and cryptographic verification libraries without touching ROCm or PyTorch).*
+
+### Step 2: Startup Flags
+ComfyUI core supports three dedicated CLI flags for manager orchestration:
+- `--enable-manager`: Enables the ComfyUI-Manager backend and frontend UI.
+- `--enable-manager-legacy-ui`: Retains the legacy modal manager interface while running on modern core.
+- `--disable-manager-ui`: Runs background manager features/endpoints while suppressing frontend UI components.
+
+Add `--enable-manager` and `Environment="COMFYUI_PATH=/opt/ComfyUI/app"` to `/etc/systemd/system/comfyui.service`.
+
+### Step 3: Headless / LAN Server Security Configuration
+When ComfyUI is hosted on a Proxmox LXC container bound to `--listen 0.0.0.0`, all web browser requests originate from remote LAN IPs (e.g., `192.168.31.x`). Under default settings, ComfyUI-Manager detects non-loopback access and locks down custom node installation and git operations.
+
+To configure remote administrative access securely for your LAN, create `/opt/ComfyUI/app/user/__manager/config.ini`:
+```ini
+[default]
+channel_url = https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main
+share_option = all
+bypass_ssl = False
+file_logging = True
+update_policy = stable-comfyui
+network_mode = personal_cloud
+security_level = normal
+db_mode = cache
+allow_git_url_install = True
+allow_pip_install = True
+```
+
+#### Key Policy Directives:
+- **`network_mode = personal_cloud`**: Informs the manager gatekeeper that remote connections across the local network are from trusted operator machines, unlocking node package installations.
+- **`security_level`**:
+  - `normal` (**Standard**, recommended): Gated validation against official registry.
+  - `normal-` (**Relaxed**): Allows secondary registries and unreviewed releases.
+  - `weak` (**Permissive**): Disables package verification guards.
+- **`allow_git_url_install = True` & `allow_pip_install = True`**: Enables direct custom node repository URLs and PyPI package installation from the UI.
+
+### Step 4: Verification Probes
+Verify that ComfyUI-Manager is active and serving endpoints:
+```bash
+# Query active queue and manager status:
+curl -s http://192.168.31.235:8188/v2/manager/queue/status
+# Output: {"total_count": 0, "done_count": 0, "in_progress_count": 0, "pending_count": 0, "is_processing": false}
+
+# Verify installed custom nodes via Manager API:
+curl -s http://192.168.31.235:8188/v2/customnode/installed
+# Output: Lists ComfyUI-FeatherOps, RDNA3-Flash-Attention with version hashes.
+```
+
+---
+
+## 7. Field Traps & Troubleshooting
 
 ### Trap 1: `SafetensorError: Error while deserializing header: header too large`
 - **Symptom:** ComfyUI fails immediately during `VAELoader` or `CLIPLoader` with:
@@ -250,7 +309,7 @@ systemctl enable --now comfyui.service
 
 ---
 
-## 7. Real-World Performance Benchmarks
+## 8. Real-World Performance Benchmarks
 
 Tested on **Sapphire PULSE AMD Radeon RX 7900 XTX 24GB** on Minisforum MS-S1 MAX via OCuLink running **Z-Image-Turbo (11.7B Lumina2 + Qwen 3.4B)** at $1024 \times 1024$ resolution (8 steps):
 
