@@ -373,11 +373,27 @@ Operator Browser ───┼─►│ SwarmUI Web Frontend (:7801)      │  �
                     └─────────────────────────────────────────┘
 ```
 
-### Step 1: Install .NET SDK 8.0 & Dependencies
-SwarmUI compiles as a self-hosted ASP.NET Core application:
+### Step 1: Install .NET SDK 8.0, .NET 10.0 & Dependencies
+SwarmUI compiles as a self-hosted ASP.NET Core application. While currently targeting `net8.0`, modern SwarmUI checks for and expects the upcoming .NET 10 SDK:
 ```bash
+# Install Ubuntu distro .NET 8 SDK:
 pct exec 107 -- apt-get update
 pct exec 107 -- apt-get install -y dotnet-sdk-8.0 git libgdiplus
+
+# Install .NET 10 SDK & ASP.NET Core Runtime side-by-side into /usr/lib/dotnet:
+pct exec 107 -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash -c '
+  curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+  chmod +x /tmp/dotnet-install.sh
+  /tmp/dotnet-install.sh --channel 10.0 --runtime aspnetcore --install-dir /usr/lib/dotnet
+  /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/lib/dotnet
+  rm /tmp/dotnet-install.sh
+'
+
+# Verify dual SDK availability:
+pct exec 107 -- dotnet --list-sdks
+# Output:
+# 8.0.133 [/usr/lib/dotnet/sdk]
+# 10.0.403 [/usr/lib/dotnet/sdk]
 ```
 
 ### Step 2: Clone & Build SwarmUI
